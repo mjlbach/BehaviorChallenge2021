@@ -109,7 +109,7 @@ class TaskPlanAgent:
     def get_segmentation(self, task, task_id, scene_id):
         task_library = os.listdir('segmentations')
         for plan in task_library:
-            if task in plan and task_id in plan and scene_id in plan:
+            if task in plan and str(task_id) in plan and scene_id in plan:
                 return plan
         return None
 
