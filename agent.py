@@ -111,7 +111,6 @@ class TaskPlanAgent:
         for plan in task_library:
             if task in plan and task_id in plan and scene_id in plan:
                 return plan
-        import pdb; pdb.set_trace()
         return None
 
     def reset(self, env, env_config):
@@ -124,10 +123,11 @@ class TaskPlanAgent:
         if segmentation_path:
             self.actions = self.generate_action_sequence(segmentation_path)
         else:
-            self.actions = []
+            self.actions = None
 
     def act(self, _):
-        import pdb; pdb.set_trace()
+        if self.actions == None:
+            return -1
         action_pair = self.actions[self.action_idx]
 
         print("Executing %s(%s)" % action_pair)
