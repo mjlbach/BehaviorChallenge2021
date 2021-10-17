@@ -110,7 +110,7 @@ class TaskPlanAgent:
         task_library = os.listdir('segmentations')
         for plan in task_library:
             if task in plan and str(task_id) in plan and scene_id in plan:
-                return plan
+                return os.path.join('segmentations', plan)
         return None
 
     def reset(self, env, env_config):
@@ -126,9 +126,12 @@ class TaskPlanAgent:
             self.actions = None
 
     def act(self, _):
-        if self.actions == None:
+        if self.actions == None or self.action_idx > len(self.actions) or len(self.actions) == 0:
             return -1
-        action_pair = self.actions[self.action_idx]
+        try:
+            action_pair = self.actions[self.action_idx]
+        except:
+            return -1
 
         print("Executing %s(%s)" % action_pair)
         primitive, obj_name = action_pair
@@ -149,4 +152,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
