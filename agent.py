@@ -1,17 +1,9 @@
-import argparse
-
 from igibson.challenge.behavior_challenge import BehaviorChallenge
-
-import numpy as np
 
 import json
 import os
-import time
 
-import yaml
-
-import igibson
-from igibson.envs.behavior_mp_env import ActionPrimitives, BehaviorMPEnv
+from igibson.examples.mp_replay.behavior_motion_primitive_env import MotionPrimitive
 from igibson.utils.ig_logging import IGLogReader
 
 
@@ -24,10 +16,9 @@ def get_empty_hand(current_hands):
     raise ValueError("Both hands are full but you are trying to execute a grasp.")
 
 
-def get_actions_from_segmentation(demo_data):
+def get_actions_from_segmentation(demo_data, only_first_from_multi_segment=True):
     print("Conversion of demo segmentation to motion primitives:")
 
-    hand_by_object = {}
     actions = []
     segmentation = demo_data["segmentations"]["flat"]["sub_segments"]
 
@@ -39,10 +30,13 @@ def get_actions_from_segmentation(demo_data):
             print("Found segment with no useful state changes: %r" % segment)
             continue
         elif len(state_records) > 1:
-            print("Found segment with multiple state changes, using the first: %r" % segment)
+            if only_first_from_multi_segment:
+                print("Found segment with multiple state changes, using the first: %r" % segment)
+                state_records = [state_records[0]]
+            else:
+                print("Found segment with multiple state changes, using all: %r" % segment)
 
-        state_change = state_records[0]
-        state_changes.append(state_change)
+        state_changes.extend(state_records)
 
     # Now go through the state changes and convert them to actions
     for i, state_change in enumerate(state_changes):
@@ -50,82 +44,52 @@ def get_actions_from_segmentation(demo_data):
         state_name = state_change["name"]
         state_value = state_change["value"]
 
-        # TODO(replayMP): Here we compute grasps based on the InHand state. Ditch this and simply do a single-hand
-        # grasp on the object we will manipulate next. That way it will be fetch-compatible.
         if state_name == "Open" and state_value is True:
-            primitive = ActionPrimitives.OPEN
+            primitive = MotionPrimitive.OPEN
             target_object = state_change["objects"][0]
         elif state_name == "Open" and state_value is False:
-            primitive = ActionPrimitives.CLOSE
+            primitive = MotionPrimitive.CLOSE
             target_object = state_change["objects"][0]
         elif state_name == "InReachOfRobot" and state_value is True:
             # The primitives support automatic navigation to relevant objects.
             continue
         elif state_name == "InHandOfRobot" and state_value is True:
-            target_object = state_change["objects"][0]
-
-            # Check that we do something with this object later on, otherwise don't grasp it.
-            is_used = False
-            for future_state_change in state_changes[i + 1 :]:
-                # We should only grasp the moved object in these cases.
-                if future_state_change["objects"][0] != target_object:
-                    continue
-
-                if future_state_change["name"] == "InHandOfRobot" and future_state_change["value"] is True:
-                    # This object is re-grasped later. No need to look any further than that.
-                    break
-
-                # We only care about Inside and OnTop use cases later.
-                if future_state_change["name"] not in ("Inside", "OnTop") or future_state_change["value"] is False:
-                    continue
-
-                # This is a supported use case so we approve the grasp.
-                is_used = True
-                break
-
-            # If the object is not used in the future, don't grasp it.
-            if not is_used:
-                continue
-
-            hand = get_empty_hand(hand_by_object)
-            hand_by_object[target_object] = hand
-            primitive = ActionPrimitives.LEFT_GRASP if hand == "left_hand" else ActionPrimitives.RIGHT_GRASP
+            # The primitives support automatic grasping of relevant objects.
+            continue
         elif state_name == "Inside" and state_value is True:
             placed_object = state_change["objects"][0]
             target_object = state_change["objects"][1]
-            if placed_object not in hand_by_object:
-                print(
-                    "Placed object %s in segment %d not currently grasped. Maybe some sort of segmentation error?"
-                    % (placed_object, i)
-                )
-                continue
-            hand = hand_by_object[placed_object]
-            del hand_by_object[placed_object]
-            primitive = (
-                ActionPrimitives.LEFT_PLACE_INSIDE if hand == "left_hand" else ActionPrimitives.RIGHT_PLACE_INSIDE
-            )
+            primitive = MotionPrimitive.PLACE_INSIDE
+
+            # Before the actual item is placed, insert a grasp request.
+            actions.append((MotionPrimitive.GRASP, placed_object))
         elif state_name == "OnTop" and state_value is True:
             placed_object = state_change["objects"][0]
             target_object = state_change["objects"][1]
-            if placed_object not in hand_by_object:
-                print(
-                    "Placed object %s in segment %d not currently grasped. Maybe some sort of segmentation error?"
-                    % (placed_object, i)
-                )
-                continue
-            hand = hand_by_object[placed_object]
-            del hand_by_object[placed_object]
-            primitive = ActionPrimitives.LEFT_PLACE_ONTOP if hand == "left_hand" else ActionPrimitives.RIGHT_PLACE_ONTOP
+            primitive = MotionPrimitive.PLACE_ON_TOP
+
+            # Before the actual item is placed, insert a grasp request.
+            actions.append((MotionPrimitive.GRASP, placed_object))
+        elif state_name == "OnFloor" and state_value is True:
+            placed_object = state_change["objects"][0]
+            target_object = state_change["objects"][1]
+            primitive = MotionPrimitive.PLACE_ON_TOP
+
+            # Before the actual item is placed, insert a grasp request.
+            actions.append((MotionPrimitive.GRASP, placed_object))
         else:
             raise ValueError("Found a state change we can't process: %r" % state_change)
 
         # Append the action.
         action = (primitive, target_object)
         actions.append(action)
+
+    for action in actions:
         print("%s(%s)" % action)
 
     print("Conversion complete.\n")
     return actions
+
 
 
 class TaskPlanAgent:
@@ -139,23 +103,33 @@ class TaskPlanAgent:
             selected_demo_data = json.load(f)
 
         # Get the actions from the segmentation
-        self.actions = get_actions_from_segmentation(selected_demo_data)
+        actions = get_actions_from_segmentation(selected_demo_data)
+        return actions
 
+    def get_segmentation(self, task, task_id, scene_id):
+        task_library = os.listdir('segmentations')
+        for plan in task_library:
+            if task in plan and task_id in plan and scene_id in plan:
+                return plan
+        import pdb; pdb.set_trace()
+        return None
 
     def reset(self, env, env_config):
+        self.env = env
         task = env_config["task"]
         task_id = env_config["task_id"]
         scene_id = env_config["scene_id"]
-        import pdb; pdb.set_trace()
+        segmentation_path = self.get_segmentation(task, task_id, scene_id)
         self.action_idx = 0
-        self.actions = self.generate_action_sequence(segmentation_path)
-        self.env = env
-        pass
+        if segmentation_path:
+            self.actions = self.generate_action_sequence(segmentation_path)
+        else:
+            self.actions = []
 
     def act(self, _):
-        # env.robots[0].set_position_orientation([0, 0, 0.7], [0, 0, 0, 1])
+        import pdb; pdb.set_trace()
         action_pair = self.actions[self.action_idx]
-        # try:
+
         print("Executing %s(%s)" % action_pair)
         primitive, obj_name = action_pair
 
@@ -171,7 +145,7 @@ class TaskPlanAgent:
 def main():
 
     challenge = BehaviorChallenge()
-    challenge.submit(TaskPlanAgent)
+    challenge.submit(TaskPlanAgent())
 
 
 if __name__ == "__main__":
