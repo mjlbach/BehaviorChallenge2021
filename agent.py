@@ -110,6 +110,7 @@ class TaskPlanAgent:
         task_library = os.listdir('segmentations')
         for plan in task_library:
             if task in plan and str(task_id) in plan and scene_id in plan:
+                import pdb; pdb.set_trace()
                 return os.path.join('segmentations', plan)
         return None
 
